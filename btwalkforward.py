@@ -9,6 +9,7 @@ import numpy as np
 - strategy should be easy to replace
 - improve the sizer (depending on the strategy)
 - etc.
+
 '''
 
 class TimeSeriesSplitImproved(TimeSeriesSplit):
