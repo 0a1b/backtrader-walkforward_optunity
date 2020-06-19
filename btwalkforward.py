@@ -3,6 +3,13 @@ from sklearn.utils import indexable
 from sklearn.utils.validation import _num_samples
 import numpy as np
 
+'''
+- one args kwargs section
+- strategy should be easy to replace
+- 
+
+'''
+
 class TimeSeriesSplitImproved(TimeSeriesSplit):
     """Time Series cross-validator
     Provides train/test indices to split time series data samples
@@ -48,7 +55,6 @@ class TimeSeriesSplitImproved(TimeSeriesSplit):
     ...     y_train, y_test = y[train_index], y[test_index]
     TRAIN: [0 1] TEST: [2]
     TRAIN: [1 2] TEST: [3]
-
     Notes
     -----
     When ``fixed_length`` is ``False``, the training set has size
@@ -107,6 +113,7 @@ class TimeSeriesSplitImproved(TimeSeriesSplit):
         test_starts = range(train_size + n_samples % n_folds,
                             n_samples - (test_size - split_size),
                             split_size)
+
         if fixed_length:
             for i, test_start in zip(range(len(test_starts)),
                                      test_starts):
@@ -131,7 +138,8 @@ import pandas_datareader as web
 from pandas import Series, DataFrame
 import random
 from copy import deepcopy
-
+import optunity.metrics
+import optunity.constraints
 
 class SMAC(bt.Strategy):
     """A simple moving average crossover strategy; crossing of a fast and slow moving average generates buy/sell
@@ -151,10 +159,11 @@ class SMAC(bt.Strategy):
         if self.params.optim:    # Use a tuple during optimization
             self.params.fast, self.params.slow = self.params.optim_fs    # fast and slow replaced by tuple's contents
 
+
         if self.params.fast > self.params.slow:
-            raise ValueError(
-                "A SMAC strategy cannot have the fast moving average's window be " + \
-                 "greater than the slow moving average window.")
+            fast = self.params.fast
+            self.params.fast = self.params.slow
+            self.params.slow = fast
 
         for d in self.getdatanames():
 
@@ -175,7 +184,7 @@ class SMAC(bt.Strategy):
             pos = self.getpositionbyname(d).size or 0
             if pos == 0:    # Are we out of the market?
                 # Consider the possibility of entrance
-                # Notice the indexing; [0] always mens the present bar, and [-1] the bar immediately preceding
+                # Notice the indexing; [0] always means the present bar, and [-1] the bar immediately preceding
                 # Thus, the condition below translates to: "If today the regime is bullish (greater than
                 # 0) and yesterday the regime was not bullish"
                 if self.regime[d][0] > 0 and self.regime[d][-1] <= 0:    # A buy signal
@@ -185,11 +194,10 @@ class SMAC(bt.Strategy):
                 if self.regime[d][0] <= 0 and self.regime[d][-1] > 0:    # A sell signal
                     self.sell(data=self.getdatabyname(d))
 
-
-class PropSizer(bt.Sizer):
+class PropSizer(bt.Sizer): # need rework
     """A position sizer that will buy as many stocks as necessary for a certain proportion of the portfolio
        to be committed to the position, while allowing stocks to be bought in batches (say, 100)"""
-    params = {"prop": 0.1, "batch": 100}
+    params = {"prop": 0.1, "batch": 100} # ?????????? why fixed proportion?
 
     def _getsizing(self, comminfo, cash, data, isbuy):
         """Returns the proper sizing"""
@@ -202,7 +210,7 @@ class PropSizer(bt.Sizer):
             shares = batches * self.params.batch    # The actual number of shares bought
 
             if shares * price > cash:
-                return 0    # Not enough money for this trade
+                return 0    # Not enough money for this trade ????????? Why not buy anything if there is no money?
             else:
                 return shares
 
@@ -242,7 +250,7 @@ datafeeds = {s: web.DataReader(s, "yahoo", start, end) for s in symbols}
 for df in datafeeds.values():
     df["OpenInterest"] = 0    # PandasData reader expects an OpenInterest column;
                               # not provided by Google and we don't use it so set to 0
-
+'''
 cerebro = bt.Cerebro(stdstats=False)
 
 plot_symbols = ["AAPL", "GOOG", "NVDA"]
@@ -269,19 +277,26 @@ cerebro.addsizer(PropSizer)
 cerebro.addanalyzer(AcctStats)
 
 cerebro.run()
-
+'''
 #cerebro.plot(iplot=True, volume=False)
 
 tscv = TimeSeriesSplitImproved(10)
-split = tscv.split(datafeeds["AAPL"], fixed_length=True, train_splits=2)
+split = tscv.split(datafeeds[symbols[0]], fixed_length=True, train_splits=2) # By Setting fixed length to False the training data will will grow over time (not the same size as with True)
 
 walk_forward_results = list()
+
+
+
 # Be prepared: this will take a while
 for train, test in split:
+
     # TRAINING
+
+    # Replace with own optimization algorithm
 
     # Generate random combinations of fast and slow window lengths to test
     windowset = set()    # Use a set to avoid duplicates
+    '''
     while len(windowset) < 40:
         f = random.randint(1, 10) * 5
         s = random.randint(1, 10) * 10
@@ -290,14 +305,45 @@ for train, test in split:
         elif f == s:    # Cannot be equal, so do nothing, discarding results
             continue
         windowset.add((f, s))
+    '''
+    #Either or
 
-    windows = list(windowset)
 
-    trainer = bt.Cerebro(stdstats=False, maxcpus=1)
-    trainer.broker.set_cash(1000000)
-    trainer.broker.setcommission(0.02)
-    trainer.addanalyzer(AcctStats)
-    trainer.addsizer(PropSizer)
+
+    def runstrat(var1, var2):
+        cerebro = bt.Cerebro(stdstats=False, maxcpus=1)
+        cerebro.addstrategy(SMAC, fast=int(var1), slow=int(var2)) # toDO make the float int choice switchable
+        cerebro.broker.setcash(1000000)
+        cerebro.broker.setcommission(commission=0.02)
+        for s, df in datafeeds.items():
+            data = bt.feeds.PandasData(dataname=df.iloc[train], name=s)  # Add a subset of data
+            # to the object that
+            # corresponds to training
+            cerebro.adddata(data)
+        cerebro.broker.set_coc(True)
+        cerebro.run()
+        return cerebro.broker.getvalue()  # ToDo make the variable that should be optimized flexible
+
+
+    opt = optunity.maximize(runstrat, num_evals=1, var1=[25, 50], var2=[30, 90]) # toDo variables should be kwargs ?
+
+    optimal_pars, details, _ = opt
+
+    #flip parameters (could give optunity the correct conditions)
+    if optimal_pars['var1'] > optimal_pars['var2']:
+        fast = optimal_pars['var1']
+        optimal_pars['var1'] = optimal_pars['var2']
+        optimal_pars['var2'] = fast
+
+    #windows = list(optimal_pars)
+
+    tester = bt.Cerebro(stdstats=False, maxcpus=1)
+    tester.broker.set_cash(1000000)
+    tester.broker.set_coc(True)
+    tester.broker.setcommission(0.02)
+    tester.addanalyzer(AcctStats)
+    tester.addsizer(PropSizer)
+    '''
     tester = deepcopy(trainer)
 
     trainer.optstrategy(SMAC, optim=True,    # Optimize the strategy (use optim variant of SMAC)...
@@ -311,9 +357,9 @@ for train, test in split:
     # Get optimal combination
     opt_res = DataFrame({r[0].params.optim_fs: r[0].analyzers.acctstats.get_analysis() for r in res}
                        ).T.loc[:, "return"].sort_values(ascending=False).index[0]
-
+    '''
     # TESTING
-    tester.addstrategy(SMAC, optim=True, optim_fs=opt_res)    # Test with optimal combination
+    tester.addstrategy(SMAC, fast=int(optimal_pars['var1']), slow=int(optimal_pars['var2']))    # Test with optimal combination toDO like above int vs float
     for s, df in datafeeds.items():
         data = bt.feeds.PandasData(dataname=df.iloc[test], name=s)    # Add a subset of data
                                                                        # to the object that
@@ -322,9 +368,10 @@ for train, test in split:
 
     res = tester.run()
     res_dict = res[0].analyzers.acctstats.get_analysis()
-    res_dict["fast"], res_dict["slow"] = opt_res
-    res_dict["start_date"] = datafeeds["AAPL"].iloc[test[0]].name
-    res_dict["end_date"] = datafeeds["AAPL"].iloc[test[-1]].name
+    res_dict["fast"] = int(optimal_pars['var1'])
+    res_dict["slow"] = int(optimal_pars['var2'])
+    res_dict["start_date"] = datafeeds[symbols[0]].iloc[test[0]].name
+    res_dict["end_date"] = datafeeds[symbols[0]].iloc[test[-1]].name
     walk_forward_results.append(res_dict)
 
 wfdf = DataFrame(walk_forward_results)
