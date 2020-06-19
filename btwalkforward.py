@@ -4,10 +4,11 @@ from sklearn.utils.validation import _num_samples
 import numpy as np
 
 '''
+- Add an analysis of whether the found overall parameters work in all times and not whetehr optimized parameters work in all times (which they should = overfitting)
 - one args kwargs section
 - strategy should be easy to replace
-- 
-
+- improve the sizer (depending on the strategy)
+- etc.
 '''
 
 class TimeSeriesSplitImproved(TimeSeriesSplit):
