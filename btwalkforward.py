@@ -14,8 +14,6 @@ import optunity.metrics
 
 '''
 - Currently (last two period is training set for next period, but I want the total to be validated on every single period
-- use (    params = dict(
-       rebal_weekday=5,  # rebalance 5 is Friday)
 - strategy should be easy to replace
 - improve the sizer (depending on the strategy)
 - pyfolio integration
@@ -26,12 +24,13 @@ import optunity.metrics
 
 '''
 
-globalparams = dict(n_splits=10,                #how many chunks the data should have
-                    fixed_length=True,          # By Setting fixed length to False the training data will will grow over time (not the same size as with True)
+globalparams = dict(strategy='SMAC',
+                    n_splits=10,                #how many chunks the data should have
+                    fixed_length=True,         # By Setting fixed length to False the training data will will grow over time (not the same size as with True)
                     train_splits=2,             #how much should be used to train the model (be aware of these two variables may not work with your strategy, i.e. SMA100 but two training splits are just 110 days or less than 100 days)
                     test_splits=1,              #how many chunks should the data be tested on?
                     start=dt.datetime(2010, 1, 1),
-                    end=dt.datetime(2016, 10, 31),
+                    end=dt.datetime(2019, 10, 31),
                     symbols=["AAPL", "GOOG", "MSFT", "AMZN", "SNY", "VZ", "IBM", "HPQ", "QCOM", "NVDA"],
 
                     )
@@ -299,7 +298,7 @@ for train, test in split:
     # Optimize with optunity
     def runstrat(var1, var2):
         cerebro = bt.Cerebro(stdstats=False, maxcpus=1)
-        cerebro.addstrategy(SMAC, fast=int(var1), slow=int(var2))  # toDO make the float int choice switchable
+        cerebro.addstrategy(eval(globalparams['strategy']), fast=int(var1), slow=int(var2))  # toDO make the float int choice switchable
         cerebro.broker.setcash(1000000)
         cerebro.broker.setcommission(commission=0.02)
         for s, df in datafeeds.items():
@@ -330,7 +329,7 @@ for train, test in split:
 
 
     # TESTING
-    tester.addstrategy(SMAC, fast=int(optimal_pars['var1']),
+    tester.addstrategy(eval(globalparams['strategy']), fast=int(optimal_pars['var1']),
                        slow=int(optimal_pars['var2']))  # Test with optimal combination toDO like above int vs float
     for s, df in datafeeds.items():
         data = bt.feeds.PandasData(dataname=df.iloc[test], name=s)  # Add a subset of data
