@@ -11,28 +11,42 @@ from pandas import Series, DataFrame
 import random
 from copy import deepcopy
 import optunity.metrics
+import backtrader.analyzers as btanal
 
 '''
-- Currently (last two period is training set for next period, but I want the total to be validated on every single period
+- Currently (last two period is training set for next period, but I want the total to be validated on every single period) --> switch!
 - strategy should be easy to replace
+- implement daily vs. weekly etc. compression)
 - improve the sizer (depending on the strategy)
+- Implement number of trades (greater than 50 + # var * 50 is suggested by the author (I assume this is meant for daily values) & volatility of trade returns for testing and training to indicate the statistical fitness of the model (https://www.tradelikeamachine.com/blog/over-optimization/part-3-in-sample-out-of-sample-trading-system-backtesting integrate )(volatility of trades?) --> self.returnvola = btind.StdDev(btind.PctChange(), period=30)
+https://www.tradelikeamachine.com/images/blog/over-optimization/quantitative-out-of-sample-walk-forward-metrics.png
 - pyfolio integration
 - better charting?
 - btreport?
 - clean up code?
+- find a momentum strategy to implement
 - etc.
-
 '''
+pd.set_option('display.max_rows', 10)
+pd.set_option('display.max_columns', 10)
+pd.set_option('display.width', 1000)
 
-globalparams = dict(strategy='SMAC',
-                    n_splits=10,                #how many chunks the data should have
-                    fixed_length=True,         # By Setting fixed length to False the training data will will grow over time (not the same size as with True)
-                    train_splits=2,             #how much should be used to train the model (be aware of these two variables may not work with your strategy, i.e. SMA100 but two training splits are just 110 days or less than 100 days)
-                    test_splits=1,              #how many chunks should the data be tested on?
+globalparams = dict(strategy='long_short',            # if a different strategy is used
+                    n_splits=10,                # how many chunks the data should have
+                    fixed_length=True,         # by setting it False the training data will will grow over time, otherwise it will keep the size given under train_splits
+                    train_splits=1,             # how many splits should be used to train the model (be aware of these two variables may not work with your strategy, i.e. SMA100 but two training splits are just 110 days or less than 100 days)
+                    test_splits=1,              # how many splits should the data be tested on?
                     start=dt.datetime(2010, 1, 1),
-                    end=dt.datetime(2019, 10, 31),
-                    symbols=["AAPL", "GOOG", "MSFT", "AMZN", "SNY", "VZ", "IBM", "HPQ", "QCOM", "NVDA"],
-
+                    end=dt.datetime(2020, 1, 31),
+                    symbols=["TQQQ"],           #, "GOOG", "MSFT", "AMZN", "SNY", "VZ", "IBM", "HPQ", "QCOM", "NVDA"
+                    cash=10000,
+                    commission=0.02,
+                    coc='True',
+                    num_evals=100,               # how often should the optimizer try to optimize
+                    var1range=[1, 1.25],        # reasonable range within the optimization should happen (variable 1)
+                    var2range=[1, 1.25],        # reasonable range within the optimization should happen (variable 2)
+                    sma_period=15,              #SMA Band Period
+                    vola=False,                 # this should only be used if one has a working strategy: if True the total period will be optimized and then the volatility of the overall parameters can be observed todo implement it
                     )
 
 
@@ -154,10 +168,48 @@ class TimeSeriesSplitImproved(TimeSeriesSplit):
                        indices[test_start:test_start + test_size])
 
 
+
+class long_short(bt.Strategy):
+    """A simple moving average crossover strategy; crossing of a fast and slow moving average generates buy/sell
+           signals"""
+    params = dict(var1=20, var2=50)  # The windows for both var1 (fast) and var2 (slow) moving averages
+
+    def __init__(self):
+        """Initialize the strategy"""
+
+        self.sma = dict()
+        self.fastma = dict()
+        self.slowma = dict()
+        self.regime = dict()
+
+
+        for d in self.getdatanames():
+            # The moving averages
+            self.sma[d] = btind.SMA(self.getdatabyname(d),  # The symbol for the moving average
+                                       period=globalparams['sma_period'],  # Fast moving average
+                                       plotname="SMA20: " + d)
+
+    def next(self):
+        """Define what will be done in a single step, including creating and closing trades"""
+        for d in self.getdatanames():  # Looping through all symbols
+            pos = self.getpositionbyname(d).size or 0
+            if pos == 0:  # Are we out of the market?
+                # Consider the possibility of entrance
+                # Notice the indexing; [0] always means the present bar, and [-1] the bar immediately preceding
+                # Thus, the condition below translates to: "If today the regime is bullish (greater than
+                # 0) and yesterday the regime was not bullish"
+                if self.sma[d][0] * self.params.var1 > self.getdatabyname(d).high[0]:  # A buy signal
+                    self.order_target_percent(data=self.getdatabyname(d), target=0.98)
+
+            else:  # We have an open position
+                if self.getdatabyname(d).close[-1] * self.params.var2 <= self.getdatabyname(d).high[0]:  # A sell signal
+                    self.order_target_percent(data=self.getdatabyname(d), target=0)
+
+
 class SMAC(bt.Strategy):
     """A simple moving average crossover strategy; crossing of a fast and slow moving average generates buy/sell
        signals"""
-    params = dict(fast=20, slow=50)  # The windows for both fast and slow moving averages
+    params = dict(var1=20, var2=50)  # The windows for both var1 (fast) and var2 (slow) moving averages
 
     def __init__(self):
         """Initialize the strategy"""
@@ -166,19 +218,20 @@ class SMAC(bt.Strategy):
         self.slowma = dict()
         self.regime = dict()
 
-        if self.params.fast > self.params.slow:
-            vfast = self.params.fast
-            self.params.fast = self.params.slow
-            self.params.slow = vfast
+        if self.params.var1 > self.params.var2:
+            vfast = self.params.var1
+            self.params.var1 = self.params.var2
+            self.params.var2 = vfast
 
         for d in self.getdatanames():
             # The moving averages
-            self.fastma[d] = btind.EMA(self.getdatabyname(d),  # The symbol for the moving average
-                                       period=self.params.fast,  # Fast moving average
+            self.fastma[d] = btind.SMA(self.getdatabyname(d),  # The symbol for the moving average
+                                       period=self.params.var1,  # Fast moving average
                                        plotname="FastMA: " + d)
-            self.slowma[d] = btind.EMA(self.getdatabyname(d),  # The symbol for the moving average
-                                       period=self.params.slow,  # Slow moving average
+            self.slowma[d] = btind.SMA(self.getdatabyname(d),  # The symbol for the moving average
+                                       period=self.params.var2,  # Slow moving average
                                        plotname="SlowMA: " + d)
+
 
             # Get the regime
             self.regime[d] = self.fastma[d] - self.slowma[d]  # Positive when bullish
@@ -203,7 +256,7 @@ class SMAC(bt.Strategy):
 class PropSizer(bt.Sizer):  # todo need rework
     """A position sizer that will buy as many stocks as necessary for a certain proportion of the portfolio
        to be committed to the position, while allowing stocks to be bought in batches (say, 100)"""
-    params = {"prop": 0.1, "batch": 100}
+    params = {"prop": 0.95, "batch": 100}
 
     def _getsizing(self, comminfo, cash, data, isbuy):
         """Returns the proper sizing"""
@@ -252,38 +305,38 @@ class AcctStats(bt.Analyzer):
 # Different stocks from past posts because of different data source (no plot for NTDOY)
 
 datafeeds = {s: web.DataReader(s, "yahoo", globalparams['start'], globalparams['end']) for s in globalparams['symbols']}
+
+#resample to weekly data
+
+for s, df in datafeeds.items():
+
+    '''
+    df['Date'] = pd.to_datetime(df['Date'])
+    df.set_index('Date', inplace=True)
+    df.sort_index(inplace=True)
+    '''
+
+    def take_first(array_like):
+        return array_like[0]
+
+    def take_last(array_like):
+        return array_like[-1]
+
+
+    ohlc_dict= {'High': 'max',
+     'Low': 'min',
+     'Open': take_first,
+     'Close': take_last,
+     'Adj Close': take_last,
+     'Volume': 'sum'}
+
+    datafeeds[s] = df.resample('W',                                 # Weekly resample
+                        loffset=pd.offsets.timedelta(days=-2)).agg(ohlc_dict).copy()  # to put the labels to Monday
+
+
 for df in datafeeds.values():
     df["OpenInterest"] = 0  # PandasData reader expects an OpenInterest column;
-    # not provided by Google and we don't use it so set to 0
-'''
-cerebro = bt.Cerebro(stdstats=False)
 
-plot_symbols = ["AAPL", "GOOG", "NVDA"]
-is_first = True
-#plot_symbols = []
-for s, df in datafeeds.items():
-    data = bt.feeds.PandasData(dataname=df, name=s)
-    if s in plot_symbols:
-        if is_first:
-            data_main_plot = data
-            is_first = False
-        else:
-            data.plotinfo.plotmaster = data_main_plot
-    else:
-        data.plotinfo.plot = False
-    cerebro.adddata(data)    # Give the data to cerebro
-
-cerebro.broker.setcash(1000000)
-cerebro.broker.setcommission(0.02)
-cerebro.addstrategy(SMAC)
-cerebro.addobserver(AcctValue)
-cerebro.addobservermulti(bt.observers.BuySell)    # Plots up/down arrows
-cerebro.addsizer(PropSizer)
-cerebro.addanalyzer(AcctStats)
-
-cerebro.run()
-'''
-# cerebro.plot(iplot=True, volume=False)
 
 tscv = TimeSeriesSplitImproved(globalparams['n_splits'])
 split = tscv.split(datafeeds[globalparams['symbols'][0]], fixed_length=globalparams['fixed_length'], train_splits=globalparams['train_splits'], test_splits=globalparams['test_splits'])
@@ -297,40 +350,38 @@ for train, test in split:
 
     # Optimize with optunity
     def runstrat(var1, var2):
-        cerebro = bt.Cerebro(stdstats=False, maxcpus=1)
-        cerebro.addstrategy(eval(globalparams['strategy']), fast=int(var1), slow=int(var2))  # toDO make the float int choice switchable
-        cerebro.broker.setcash(1000000)
-        cerebro.broker.setcommission(commission=0.02)
+        cerebro = bt.Cerebro(stdstats=False, maxcpus=None)
+        cerebro.addstrategy(eval(globalparams['strategy']), var1=var1, var2=var2)  # toDO make the float int choice switchable
+        cerebro.broker.setcash(globalparams['cash'])
+        cerebro.broker.setcommission(globalparams['commission'])
         for s, df in datafeeds.items():
             data = bt.feeds.PandasData(dataname=df.iloc[train], name=s)  # Add a subset of data
             # to the object that
             # corresponds to training
             cerebro.adddata(data)
-        cerebro.broker.set_coc(True)
+        cerebro.broker.set_coc(eval(globalparams['coc']))
         cerebro.run()
         return cerebro.broker.getvalue()  # ToDo make the variable that should be optimized flexible
 
-    opt = optunity.maximize(runstrat, num_evals=1, var1=[25, 50], var2=[30, 90])  # toDo variables should be kwargs ?
+    opt = optunity.maximize(runstrat, num_evals=globalparams['num_evals'], var1=globalparams['var1range'], var2=globalparams['var2range'])
 
     optimal_pars, details, _ = opt
 
-    # flip parameters (could give optunity the correct conditions)
-    if optimal_pars['var1'] > optimal_pars['var2']:
-        fast = optimal_pars['var1']
-        optimal_pars['var1'] = optimal_pars['var2']
-        optimal_pars['var2'] = fast
 
-    tester = bt.Cerebro(stdstats=False, maxcpus=1)
-    tester.broker.set_cash(1000000)
-    tester.broker.set_coc(True)
-    tester.broker.setcommission(0.02)
+    tester = bt.Cerebro(stdstats=False, maxcpus=None)
+    tester.broker.set_cash(globalparams['cash'])
+    tester.broker.set_coc(eval(globalparams['coc']))
+    tester.broker.setcommission(globalparams['commission'])
     tester.addanalyzer(AcctStats)
     tester.addsizer(PropSizer)
+    tester.addanalyzer(bt.analyzers.SharpeRatio, riskfreerate=0.0)
+
+
 
 
     # TESTING
-    tester.addstrategy(eval(globalparams['strategy']), fast=int(optimal_pars['var1']),
-                       slow=int(optimal_pars['var2']))  # Test with optimal combination toDO like above int vs float
+    tester.addstrategy(eval(globalparams['strategy']), var1=optimal_pars['var1'],
+                       var2=optimal_pars['var2'])  # Test with optimal combination toDO like above int vs float
     for s, df in datafeeds.items():
         data = bt.feeds.PandasData(dataname=df.iloc[test], name=s)  # Add a subset of data
         # to the object that
@@ -339,34 +390,35 @@ for train, test in split:
 
     res = tester.run()
     res_dict = res[0].analyzers.acctstats.get_analysis()
-    res_dict["fast"] = int(optimal_pars['var1'])
-    res_dict["slow"] = int(optimal_pars['var2'])
+    res_dict["var1"] = optimal_pars['var1']
+    res_dict["var2"] = optimal_pars['var2']
+    res_dict["sharpe"] = res[0].analyzers.sharperatio.get_analysis()['sharperatio']
     res_dict["start_date"] = datafeeds[globalparams['symbols'][0]].iloc[test[0]].name
     res_dict["end_date"] = datafeeds[globalparams['symbols'][0]].iloc[test[-1]].name
     walk_forward_results.append(res_dict)
 
 wfdf = DataFrame(walk_forward_results)
-print(wfdf)
+print(wfdf.loc[:, wfdf.columns != 'start'])
 
 
 class SMACWalkForward(bt.Strategy):
     """The SMAC strategy but in a walk-forward analysis context"""
     params = {"start_dates": None,  # Starting days for trading periods (a list)
               "end_dates": None,  # Ending day for trading periods (a list)
-              "fast": None,  # List of fast moving average windows, corresponding to start dates (a list)
-              "slow": None}  # Like fast, but for slow moving average window (a list)
+              "var1": None,  # List of fast moving average windows, corresponding to start dates (a list)
+              "var2": None}  # Like fast, but for slow moving average window (a list)
 
     # All the above lists must be of the same length, and they all line up
 
     def __init__(self):
         """Initialize the strategy"""
-
-        self.fastma = dict()
-        self.slowma = dict()
+        self.sma = dict()
+        self.var1 = dict()
+        self.var2 = dict()
         self.regime = dict()
 
         self.date_combos = [c for c in zip(self.p.start_dates, self.p.end_dates)]
-
+        '''
         # Error checking
         if type(self.p.start_dates) is not list or type(self.p.end_dates) is not list or \
                 type(self.p.fast) is not list or type(self.p.slow) is not list:
@@ -374,41 +426,50 @@ class SMACWalkForward(bt.Strategy):
         elif len(self.p.start_dates) != len(self.p.end_dates) or \
                 len(self.p.fast) != len(self.p.start_dates) or len(self.p.slow) != len(self.p.start_dates):
             raise ValueError("All lists passed to params must have same length.")
-
+        '''
         for d in self.getdatanames():
-            self.fastma[d] = dict()
-            self.slowma[d] = dict()
+            self.sma[d] = dict()
+            self.var1[d] = dict()
+            self.var2[d] = dict()
             self.regime[d] = dict()
 
             # Additional indexing, allowing for differing start/end dates
-            for sd, ed, f, s in zip(self.p.start_dates, self.p.end_dates, self.p.fast, self.p.slow):
+            for sd, ed, f, s in zip(self.p.start_dates, self.p.end_dates, self.p.var1, self.p.var2):
                 # More error checking
+                '''
                 if type(f) is not int or type(s) is not int:
                     raise ValueError("Must include only integers in fast, slow.")
                 elif f > s:
                     raise ValueError("Elements in fast cannot exceed elements in slow.")
                 elif f <= 0 or s <= 0:
                     raise ValueError("Moving average windows must be positive.")
+                
 
                 if type(sd) is not dt.date or type(ed) is not dt.date:
                     raise ValueError("Only datetime dates allowed in start_dates, end_dates.")
                 elif ed - sd < dt.timedelta(0):
                     raise ValueError("Start dates must always be before end dates.")
-
+                '''
                 # The moving averages
                 # Notice that different moving averages are obtained for different combinations of
                 # start/end dates
+                self.sma[d][(sd, ed)] = btind.SimpleMovingAverage(self.getdatabyname(d),
+                                                                     period=globalparams['sma_period'],
+                                                                     plot=False)
+                self.var1[d][(sd, ed)] = f
+                self.var2[d][(sd, ed)] = s
+                '''
                 self.fastma[d][(sd, ed)] = btind.SimpleMovingAverage(self.getdatabyname(d),
                                                                      period=f,
                                                                      plot=False)
                 self.slowma[d][(sd, ed)] = btind.SimpleMovingAverage(self.getdatabyname(d),
                                                                      period=s,
                                                                      plot=False)
-
+              
                 # Get the regime
                 self.regime[d][(sd, ed)] = self.fastma[d][(sd, ed)] - self.slowma[d][(sd, ed)]
                 # In the future, use the backtrader indicator btind.CrossOver()
-
+                '''
     def next(self):
         """Define what will be done in a single step, including creating and closing trades"""
 
@@ -433,18 +494,25 @@ class SMACWalkForward(bt.Strategy):
                 # Notice the indexing; [0] always mens the present bar, and [-1] the bar immediately preceding
                 # Thus, the condition below translates to: "If today the regime is bullish (greater than
                 # 0) and yesterday the regime was not bullish"
-                if self.regime[d][dtidx][0] > 0 and self.regime[d][dtidx][-1] <= 0:  # A buy signal
-                    self.buy(data=self.getdatabyname(d))
+                '''if self.slowma[d][dtidx][0] > self.getdatabyname(d).close[0]:  # A buy signal
+                    self.sell(data=self.getdatabyname(d), size=1000)
 
             else:  # We have an open position
-                if self.regime[d][dtidx][0] <= 0 and self.regime[d][dtidx][-1] > 0:  # A sell signal
-                    self.sell(data=self.getdatabyname(d))
+                if self.fastma[d][dtidx][0] < self.getdatabyname(d).close[0]:  # A sell signal
+                    self.close(data=self.getdatabyname(d), size=1000)
+            '''
+                if self.sma[d][dtidx][0] * self.var1[d][dtidx] > self.getdatabyname(d).high[0]:  # A buy signal
+                    self.order_target_percent(data=self.getdatabyname(d), target=0.98)
 
+            else:  # We have an open position
+                if self.getdatabyname(d).close[-1] * self.var2[d][dtidx] <= self.getdatabyname(d).high[0]:  # A sell signal
+                    self.order_target_percent(data=self.getdatabyname(d), target=0)
 
-cerebro_wf = bt.Cerebro(stdstats=False)
+cerebro_wf = bt.Cerebro(stdstats=False, maxcpus=None)
 
-plot_symbols = ["AAPL", "GOOG", "NVDA"]
+plot_symbols = globalparams['symbols']
 is_first = True
+
 # plot_symbols = []
 for s, df in datafeeds.items():
     data = bt.feeds.PandasData(dataname=df, name=s)
@@ -455,22 +523,27 @@ for s, df in datafeeds.items():
         else:
             data.plotinfo.plotmaster = data_main_plot
     else:
-        data.plotinfo.plot = False
+        data.plotinfo.plot = True
     cerebro_wf.adddata(data)  # Give the data to cerebro
 
-cerebro_wf.broker.setcash(1000000)
-cerebro_wf.broker.setcommission(0.02)
+cerebro_wf.broker.setcash(globalparams['cash'])
+cerebro_wf.broker.setcommission(globalparams['commission'])
+cerebro_wf.broker.set_coc(eval(globalparams['coc']))
+
 cerebro_wf.addstrategy(SMACWalkForward,
                        # Give the results of the above optimization to SMACWalkForward (NOT OPTIONAL)
-                       fast=[int(f) for f in wfdf.fast],
-                       slow=[int(s) for s in wfdf.slow],
+                       var1=[f for f in wfdf.var1],
+                       var2=[s for s in wfdf.var2],
                        start_dates=[sd.date() for sd in wfdf.start_date],
                        end_dates=[ed.date() for ed in wfdf.end_date])
 cerebro_wf.addobserver(AcctValue)
 cerebro_wf.addobservermulti(bt.observers.BuySell)  # Plots up/down arrows
 cerebro_wf.addsizer(PropSizer)
 cerebro_wf.addanalyzer(AcctStats)
+cerebro_wf.addanalyzer(bt.analyzers.SharpeRatio, riskfreerate=0.0)
 
-cerebro_wf.run()
 
-cerebro_wf.plot(iplot=True, volume=False)
+results = cerebro_wf.run()
+print(f"Sharpe: {results[0].analyzers.sharperatio.get_analysis()['sharperatio']:.3f}")
+
+cerebro_wf.plot(iplot=True)
